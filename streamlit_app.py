@@ -23,7 +23,7 @@ client = OpenAI(
 
 st.title("Hello", anchor=False) 
 
-question = st.text_input("question")
+question = st.chat_input("question")
 
 file = st.file_uploader("upload pdf")
 
@@ -44,7 +44,7 @@ if file:
     # Langchain Embedding
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-    # ------------------ pushing data to vector db uisng langchain ------------------ 
+    # pushing data 
     vector_store = Chroma.from_documents(documents=documents, embedding=embeddings, collection_name="ipl_langchain", persist_directory="croma_langchain")
     st.success("pushed data to database")
 
@@ -59,8 +59,6 @@ if file:
     #     start = end - 200
     # st.success(f"Chunking successful {len(chunks)}")
     # st.success(chunks)
-
-
     # # Embedding
     # embeded_chunks = []
     # model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -100,18 +98,26 @@ if file:
 
 
 if question:
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    dbclient = chromadb.PersistentClient(path="/croma_db")
-    collection = dbclient.get_or_create_collection(name="ipl_info")
+    # # =============== Searching Similarities (Langchan) =============== 
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vector_store = Chroma(embedding_function=embeddings, collection_name="ipl_langchain", persist_directory="croma_langchain")
+    retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+    docs = retriever.invoke(question)
+    # st.write("".join(doc.page_content for doc in docs))
+    context = "\n".join(doc.page_content for doc in docs)
 
-    query_vector = model.encode(question).tolist() 
-    results = collection.query(
-        query_embeddings=[query_vector],
-        n_results=10
-    )
-
-    # st.write(results["documents"][0])
-    context = "\n\n".join(results["documents"][0])
+    # # =============== Searching Similarities (Manual) =============== 
+    # model = SentenceTransformer("all-MiniLM-L6-v2")
+    # dbclient = chromadb.PersistentClient(path="/croma_db")
+    # collection = dbclient.get_or_create_collection(name="ipl_info")
+    # query_vector = model.encode(question).tolist() 
+    # results = collection.query(
+    #     query_embeddings=[query_vector],
+    #     n_results=10
+    # )
+    # # st.write(results["documents"][0])
+    # context = "\n\n".join(results["documents"][0])
+    
     prompt = ipl_prompt(context, question)
     # st.write(prompt)
 
