@@ -1,3 +1,7 @@
 /.env
+/croma_langchain
+/croma_db
 croma_langchain
-croma_db
+croma_langchain/chroma.sqlite3
+croma_langchain/ca9192fe-51c4-4519-a43d-47d12bac4355/data_level0.bin
+croma_langchain/ca9192fe-51c4-4519-a43d-47d12bac4355/length.bin
