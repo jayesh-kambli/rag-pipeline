@@ -70,6 +70,15 @@ def search_ipl_knowledge(
     print("Running Rag Tool...")
 
     docs = retriever.invoke(question)
-    context = "\n".join(doc.page_content for doc in docs)
 
-    return context
+    # Label every chunk with where it came from, so the app can show sources
+    blocks = []
+    for doc in docs:
+        source = doc.metadata.get("source", "unknown")
+        chunk_id = doc.metadata.get("chunk_id", "?")
+        blocks.append(f"[{source} | chunk {chunk_id}]\n{doc.page_content}")
+
+    return SOURCE_SEPARATOR.join(blocks)
+
+
+SOURCE_SEPARATOR = "\n\n-----\n\n"

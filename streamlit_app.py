@@ -1,29 +1,22 @@
-import streamlit as st 
-from openai import OpenAI
-from dotenv import load_dotenv
-from utils.pdf_utils import extract_text
-from utils.prompt import ipl_prompt 
-from sentence_transformers import SentenceTransformer
 import os
-# import sys
-# import pysqlite3
-# sys.module["sqlite3"] = pysqlite3
 
-import chromadb 
+import streamlit as st
+from dotenv import load_dotenv
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-
-from workflows.agent import create_ipl_agent
 
 load_dotenv()
-api_key = os.getenv("OPEN_AI_API_KEY")
-client = OpenAI(
-    api_key=api_key
-)
+
+from utils.pdf_utils import extract_text
+from workflows.agent import create_ipl_agent
+from workflows.tools import vector_store, SOURCE_SEPARATOR
+
+st.set_page_config(page_title="IPL Information Chatbot", page_icon="🏏")
 
 st.title("IPL Information Chatbot", anchor=False)
-st.caption("Ask anything about the IPL. Answers come from the IPL document stored in the vector database.")
+st.caption(
+    "A RAG chatbot: your question is matched against chunks of an IPL document "
+    "stored in a vector database, and the AI answers only from those chunks."
+)
 
 # Every question calls a paid API, so a public deployment is gated behind
 # an access code (set ASSISTANT_ACCESS_CODE in .env or Streamlit secrets).
@@ -40,128 +33,131 @@ if ASSISTANT_ACCESS_CODE and not st.session_state.get("unlocked", False):
                 st.error("Incorrect access code.")
     st.stop()
 
-question = st.chat_input("Ask a question about the IPL")
 
-file = st.file_uploader("Optional: upload another IPL PDF to add to the knowledge base")
+# ---------------- Knowledge base (already loaded) ----------------
 
-if file:
-    data = extract_text(file)
-    st.success(f"Text extracted: {len(data)} characters")
+@st.cache_data(ttl=60)
+def knowledge_base_summary():
+    metadatas = vector_store.get(include=["metadatas"])["metadatas"]
+    counts = {}
+    for meta in metadatas:
+        source = meta.get("source", "unknown")
+        counts[source] = counts.get(source, 0) + 1
+    return counts
 
-    # Chunking: 1000-character chunks with 200-character overlap
-    chunks = []
-    start = 0
-    while start < len(data):
-        chunks.append(data[start:start + 1000])
-        start += 800
 
-    # =============== Method 1 Of Flooting Vector DB ===============
-    # Langchain Document
-    documents = []
-    for i, chunk in enumerate(chunks):
-        documents.append(Document(page_content=chunk, metadata={
-            "source": "ipl_wikipedia.pdf",
-            "chunk_id": i
-        }))
+sources = knowledge_base_summary()
+with st.container(border=True):
+    st.markdown("**📚 Knowledge base (already loaded)**")
+    for name, count in sources.items():
+        st.write(f"📄 `{name}`: {count} chunks")
+    st.caption("Answers come only from these documents. No upload needed.")
 
-    # Langchain Embedding
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+with st.expander("Add another IPL PDF (optional)"):
+    file = st.file_uploader("Upload a PDF", type="pdf")
+    if file and st.button("Add to knowledge base"):
+        data = extract_text(file)
 
-    # pushing data 
-    vector_store = Chroma.from_documents(documents=documents, embedding=embeddings, collection_name="ipl_langchain", persist_directory="croma_langchain")
-    st.success(f"Added {len(documents)} chunks to the knowledge base")
+        # Chunking: 1000-character chunks with 200-character overlap
+        chunks = []
+        start = 0
+        while start < len(data):
+            chunks.append(data[start:start + 1000])
+            start += 800
 
-    # # =============== Method 2 Of Flooting Vector DB =============== 
-    # # Chunking
-    # start = 0
-    # chunks = []
-    # while start < len(data):
-    #     end = start + 1000
-    #     chunk = data[start:end]
-    #     chunks.append(chunk)
-    #     start = end - 200
-    # st.success(f"Chunking successful {len(chunks)}")
-    # st.success(chunks)
-    # # Embedding
-    # embeded_chunks = []
-    # model = SentenceTransformer("all-MiniLM-L6-v2")
-    # for i, chunk in enumerate(chunks):
-    #     vector = model.encode(chunk).tolist() 
-    #     embeded_chunks.append({
-    #         "id": i,
-    #         "text": chunk,
-    #         "embedding": vector
-    #     })
+        documents = [
+            Document(page_content=chunk, metadata={"source": file.name, "chunk_id": i})
+            for i, chunk in enumerate(chunks)
+        ]
+        vector_store.add_documents(documents)
+        knowledge_base_summary.clear()
+        st.success(f"Added {len(documents)} chunks from {file.name}")
+        st.rerun()
 
-    
 
-    # st.success(f"Embedding successful {len(embeded_chunks)}")
-    # # st.success(chunks)
+# ---------------- Helpers ----------------
 
-    # # ------------------ pushing data to vector db ------------------ 
+def message_text(message):
+    """Turn an AI message's content into plain text (it can be a list of blocks)."""
+    content = message.content
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text", ""))
+    return "\n".join(parts)
 
-    # dbclient = chromadb.PersistentClient(path="/croma_db")
-    # collection = dbclient.get_or_create_collection(name="ipl_info")
 
-    # ids = []
-    # docs = []
-    # embeds = []
-    # metadata = []
-    # for item in embeded_chunks:
-    #     ids.append(str(item["id"]))
-    #     docs.append(item["text"])
-    #     embeds.append(item["embedding"])
-    #     metadata.append({
-    #         "source": "ipl_wikipedia.pdf",
-    #         "chunk_id": str(item["id"])
-    #     })
+def retrieved_sources(messages):
+    """Collect the chunks the search tool returned while answering."""
+    found = []
+    for message in messages:
+        if getattr(message, "type", "") == "tool" and message.name == "search_ipl_knowledge":
+            for block in str(message.content).split(SOURCE_SEPARATOR):
+                header, _, text = block.partition("\n")
+                found.append((header.strip("[]"), text.strip()))
+    return found
 
-    # collection.upsert(ids=ids, embeddings=embeds, metadatas=metadata, documents=docs)
-    # st.success("DB Flooded")
 
+def show_sources(found):
+    if not found:
+        st.caption("⚠️ No document chunks were used for this answer.")
+        return
+    with st.expander(f"📎 Sources: {len(found)} chunks used"):
+        for header, text in found:
+            st.markdown(f"**{header}**")
+            st.text(text[:600] + ("..." if len(text) > 600 else ""))
+
+
+@st.cache_resource
+def get_agent():
+    return create_ipl_agent()
+
+
+# ---------------- Chat ----------------
+
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+for item in st.session_state.history:
+    with st.chat_message(item["role"]):
+        st.markdown(item["text"])
+        if item["role"] == "assistant":
+            show_sources(item["sources"])
+
+SAMPLE_QUESTIONS = [
+    "Which team has won the most IPL titles?",
+    "When was the first IPL season played?",
+    "Who won the IPL in 2024?",
+]
+
+clicked = None
+if not st.session_state.history:
+    st.write("Try a sample question:")
+    cols = st.columns(len(SAMPLE_QUESTIONS))
+    for col, sample in zip(cols, SAMPLE_QUESTIONS):
+        if col.button(sample, width="stretch"):
+            clicked = sample
+
+question = st.chat_input("Ask a question about the IPL") or clicked
 
 if question:
+    with st.chat_message("user"):
+        st.markdown(question)
 
-    st.chat_message("user").write(question)
-    with st.spinner("Thinking..."):
-        agent = create_ipl_agent()
-        res = agent.invoke({
-            "messages": [
-                {
-                    "role": "user",
-                    "content": question
-                }
-            ]
-        })
+    with st.chat_message("assistant"):
+        with st.spinner("Searching the IPL document..."):
+            result = get_agent().invoke(
+                {"messages": [{"role": "user", "content": question}]}
+            )
+        answer = message_text(result["messages"][-1])
+        found = retrieved_sources(result["messages"])
+        st.markdown(answer)
+        show_sources(found)
 
-    st.chat_message("assistant").write(res["messages"][-1].content)
-
-    # # # =============== Searching Similarities (Langchan) =============== 
-    # embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    # vector_store = Chroma(embedding_function=embeddings, collection_name="ipl_langchain", persist_directory="croma_langchain")
-    # retriever = vector_store.as_retriever(search_kwargs={"k": 10})
-    # docs = retriever.invoke(question)
-    # # st.write("".join(doc.page_content for doc in docs))
-    # context = "\n".join(doc.page_content for doc in docs)
-
-    # # # =============== Searching Similarities (Manual) =============== 
-    # # model = SentenceTransformer("all-MiniLM-L6-v2")
-    # # dbclient = chromadb.PersistentClient(path="/croma_db")
-    # # collection = dbclient.get_or_create_collection(name="ipl_info")
-    # # query_vector = model.encode(question).tolist() 
-    # # results = collection.query(
-    # #     query_embeddings=[query_vector],
-    # #     n_results=10
-    # # )
-    # # # st.write(results["documents"][0])
-    # # context = "\n\n".join(results["documents"][0])
-    
-    # prompt = ipl_prompt(context, question)
-    # # st.write(prompt)
-
-    # response = client.responses.create(
-    #     model="gpt-6-luna",
-    #     input=prompt
-    # )
-    # st.write(response.output_text)
-
+    st.session_state.history.append({"role": "user", "text": question})
+    st.session_state.history.append({"role": "assistant", "text": answer, "sources": found})
+    st.rerun()
