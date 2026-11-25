@@ -25,6 +25,21 @@ client = OpenAI(
 st.title("IPL Information Chatbot", anchor=False)
 st.caption("Ask anything about the IPL. Answers come from the IPL document stored in the vector database.")
 
+# Every question calls a paid API, so a public deployment is gated behind
+# an access code (set ASSISTANT_ACCESS_CODE in .env or Streamlit secrets).
+ASSISTANT_ACCESS_CODE = os.getenv("ASSISTANT_ACCESS_CODE")
+if ASSISTANT_ACCESS_CODE and not st.session_state.get("unlocked", False):
+    with st.form("unlock"):
+        st.write("This chatbot calls a paid AI API. Enter the access code to use it.")
+        code_input = st.text_input("Access code", type="password")
+        if st.form_submit_button("Unlock"):
+            if code_input == ASSISTANT_ACCESS_CODE:
+                st.session_state.unlocked = True
+                st.rerun()
+            else:
+                st.error("Incorrect access code.")
+    st.stop()
+
 question = st.chat_input("Ask a question about the IPL")
 
 file = st.file_uploader("Optional: upload another IPL PDF to add to the knowledge base")
